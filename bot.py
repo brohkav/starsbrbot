@@ -1,6 +1,8 @@
 import os
 import logging
 import json
+import time
+import sys
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
@@ -9,24 +11,29 @@ from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from dotenv import load_dotenv
 from config import MIN_STARS, RATES, PAYMENT_METHODS, MESSAGES
 
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bot_errors.log'),
+        logging.StreamHandler()
+    ]
+)
+
 # Загрузка конфига
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
-SUPPORT_CHAT_ID = "broshkav"  # Замените на реальный ID чата поддержки
+SUPPORT_CHAT_ID = "broshkav"
 
 # Инициализация бота
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
-logging.basicConfig(level=logging.INFO)
-
-# Временное хранилище (вместо БД)
 user_data = {}
 
-# ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===== #
 def save_history(user_id: int, stars: int, amount: float):
-    """Сохраняет историю покупок в JSON"""
     data = {
         "date": datetime.now().strftime("%d.%m.%Y %H:%M"),
         "stars": stars,
@@ -36,7 +43,6 @@ def save_history(user_id: int, stars: int, amount: float):
         json.dump({str(user_id): data}, f)
         f.write('\n')
 
-# ===== КЛАВИАТУРЫ ===== #
 def get_stars_keyboard():
     keyboard = InlineKeyboardMarkup(row_width=3)
     buttons = [
@@ -69,7 +75,6 @@ def get_admin_confirm_keyboard(user_id):
     return keyboard
 
 def get_main_keyboard():
-    """Главное меню с кнопками"""
     markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(
         KeyboardButton('⭐ Купить звёзды'),
@@ -79,7 +84,6 @@ def get_main_keyboard():
     )
     return markup
 
-# ===== ОБРАБОТЧИКИ ===== #
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
     await message.answer(
@@ -105,7 +109,7 @@ async def show_history(message: types.Message):
             return
             
         text = "📅 <b>Ваши покупки:</b>\n\n"
-        for item in user_history[-5:]:  # Последние 5 записей
+        for item in user_history[-5:]:
             data = item[str(user_id)]
             text += f"▪ {data['date']} - {data['stars']} звёзд ({data['amount']}₸)\n"
         
@@ -115,7 +119,7 @@ async def show_history(message: types.Message):
 
 @dp.message_handler(text='💎 Бонусы')
 async def daily_bonus(message: types.Message):
-    bonus = 0  # Бонус временно отключен
+    bonus = 0
     await message.answer(
         f"🎁 Бонусная система временно недоступна\n"
         f"🔸 Сегодня вы получили: {bonus} звёзд",
@@ -179,7 +183,6 @@ async def select_payment(message: types.Message):
         await message.answer("❌ Сначала выберите количество звёзд!")
         return
     
-    # Определяем метод оплаты
     if message.text == PAYMENT_METHODS["kaspi"]["name"]:
         method = "kaspi"
     elif message.text == PAYMENT_METHODS["cryptobot"]["name"]:
@@ -190,16 +193,12 @@ async def select_payment(message: types.Message):
     stars = user_data[user_id]["stars"]
     rate = RATES[method]["rate"]
     currency = RATES[method]["currency"]
-    
-    # Расчёт суммы для любого количества звёзд
     amount = (stars * rate) / 100
     
-    # Сохраняем метод оплаты
     user_data[user_id]["payment_method"] = method
     user_data[user_id]["amount"] = round(amount, 2)
     user_data[user_id]["currency"] = currency
     
-    # Отправляем реквизиты
     await message.answer(
         MESSAGES["payment_details"].format(
             method=PAYMENT_METHODS[method]["name"],
@@ -223,10 +222,8 @@ async def user_paid(callback_query: types.CallbackQuery):
     amount = user_data[user_id]["amount"]
     currency = user_data[user_id]["currency"]
     
-    # Сохраняем в историю
     save_history(user_id, stars, amount)
     
-    # Уведомляем админа
     await bot.send_message(
         ADMIN_ID,
         MESSAGES["admin_notify"].format(
@@ -252,16 +249,32 @@ async def admin_decision(callback_query: types.CallbackQuery):
     
     if action == "confirm":
         await bot.send_message(user_id, MESSAGES["admin_confirm"])
+        # Добавляем запрос отзыва после подтверждения
+        await bot.send_message(
+            user_id,
+            "💌 Пожалуйста, оставьте отзыв: @otzivibroshka"
+        )
     else:
         await bot.send_message(user_id, MESSAGES["admin_reject"])
     
     await bot.answer_callback_query(callback_query.id, "✅ Решение отправлено!")
 
-# ===== ЗАПУСК ===== #
+def run_bot():
+    try:
+        logging.info("Запуск бота...")
+        if not os.path.exists('history.json'):
+            with open('history.json', 'w') as f:
+                pass
+        
+        executor.start_polling(dp, skip_updates=True)
+    except Exception as e:
+        logging.error(f"КРИТИЧЕСКАЯ ОШИБКА: {str(e)}")
+        logging.info("Попытка перезапуска через 10 секунд...")
+        time.sleep(10)
+        os.execv(sys.executable, ['python'] + sys.argv)
+
 if __name__ == "__main__":
-    # Создаем файл истории если его нет
-    if not os.path.exists('history.json'):
-        with open('history.json', 'w') as f:
-            pass
-            
-    executor.start_polling(dp, skip_updates=True)
+    while True:
+        run_bot()
+        logging.warning("Бот неожиданно завершил работу. Перезапуск...")
+        time.sleep(5)
